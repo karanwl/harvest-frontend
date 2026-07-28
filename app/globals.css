@@ -2266,3 +2266,64 @@ select:focus {
   background: rgba(231, 124, 88, 0.12);
   color: #93381d;
 }
+
+/* ------------------------------------------------------- inline revision */
+
+.revision-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  border: 1px solid rgba(36, 93, 67, 0.28);
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.revision-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--green-dark);
+  font-size: 13.5px;
+}
+
+.revision-heading strong {
+  font-weight: 600;
+}
+
+.revision-close {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.revision-close:hover {
+  background: var(--sage);
+  color: var(--ink);
+}
+
+.revision-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.revision-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.revision-actions .primary-button,
+.revision-actions .ghost-button {
+  margin-left: auto;
+}

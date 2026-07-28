@@ -41,6 +41,8 @@ import {
   listProviderKeys,
   ProviderKeySummary,
   saveProviderKey,
+  streamPlanRevision,
+  RevisionScope,
   getOrCreateThreadId,
   getSessionToken,
   signInWithGoogle,
@@ -164,6 +166,15 @@ export default function Home() {
   const [customModel, setCustomModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [providerKeys, setProviderKeys] = useState<ProviderKeySummary[]>([]);
+  const [revisionTarget, setRevisionTarget] = useState<{
+    scope: RevisionScope;
+    label: string;
+  } | null>(null);
+  const [revisionText, setRevisionText] = useState("");
+  const [revising, setRevising] = useState(false);
+  const [revisionStage, setRevisionStage] =
+    useState<ChatProgressStage>("starting");
+  const revisionRequest = useRef<AbortController | null>(null);
   const [savingKey, setSavingKey] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -838,35 +849,103 @@ export default function Home() {
     }
   }
 
+  // Revision happens against the plan itself. The scope travels as data, so a
+  // one-meal edit stays a one-meal edit regardless of what the user types.
+  function openRevision(scope: RevisionScope, label: string) {
+    setRevisionTarget({ scope, label });
+    setRevisionText("");
+    setError("");
+  }
+
+  function closeRevision() {
+    revisionRequest.current?.abort();
+    revisionRequest.current = null;
+    setRevisionTarget(null);
+    setRevisionText("");
+    setRevising(false);
+  }
+
   function reviseMeal(meal: PlannedMeal) {
-    setMessage(
-      `Revise only "${meal.name}" (${meal.mealType}) on ${
-        meal.date || meal.day
-      }. Keep every other meal and day exactly unchanged. Recalculate affected macros, advance prep, and shopping quantities. Change request: `
+    openRevision(
+      {
+        kind: "meal",
+        date: meal.date || meal.day,
+        mealName: meal.name,
+        mealType: meal.mealType,
+      },
+      meal.name
     );
-    setSelectedMeal(null);
-    setView("chat");
   }
 
   function reviseDay(day: { day: string; date?: string }) {
-    setMessage(
-      `Revise only the meals on ${day.date || day.day}. Keep every other day exactly unchanged. Recalculate affected macros, advance prep, and shopping quantities. Change request: `
-    );
-    setView("chat");
+    openRevision({ kind: "day", date: day.date || day.day }, day.day);
   }
 
   function reviseWholePlan() {
-    setMessage(
-      "Revise the entire current meal plan. Keep my saved preferences, pantry, nutrition targets, schedule, and requested plan length in mind. Change request: "
-    );
-    setView("chat");
+    openRevision({ kind: "plan" }, "the whole plan");
   }
 
   function rebalancePlanMacros() {
-    setMessage(
-      "Revise the entire current meal plan to meet every saved daily macro target on each individual date. Adjust real ingredient quantities, portions, recipes, nutrition estimates, advance prep, and shopping quantities; do not merely relabel the nutrition values. Preserve my dietary preferences, pantry priorities, schedule, and plan length."
+    openRevision({ kind: "plan" }, "the whole plan");
+    setRevisionText(
+      "Rebalance every day to meet my saved daily macro targets by changing real ingredients and portions."
     );
-    setView("chat");
+  }
+
+  async function submitRevision(event?: FormEvent) {
+    event?.preventDefault();
+    if (!revisionTarget || revising || !canChat) return;
+
+    const controller = new AbortController();
+    revisionRequest.current = controller;
+    setRevising(true);
+    setRevisionStage("starting");
+    setError("");
+
+    try {
+      const result = await streamPlanRevision<{
+        plan: MealPlan | null;
+        assistantMessage: string;
+      }>({
+        apiKey: apiKey.trim() || undefined,
+        signal: controller.signal,
+        body: {
+          threadId,
+          scope: revisionTarget.scope,
+          instruction: revisionText.trim(),
+          provider,
+          model: activeModel,
+        },
+        onProgress: (stage) => setRevisionStage(stage),
+      });
+
+      if (result.plan) {
+        setPlan(result.plan);
+        // Keep the open recipe in sync with the meal that just replaced it.
+        setSelectedMeal((current) =>
+          current
+            ? result.plan!.meals.find(
+                (meal) =>
+                  (meal.date || meal.day) === (current.date || current.day) &&
+                  meal.mealType === current.mealType
+              ) ?? null
+            : null
+        );
+      }
+      setRevisionTarget(null);
+      setRevisionText("");
+      apiRequest<{ versions: PlanVersion[] }>("/api/plans/history", {})
+        .then((history) => setPlanVersions(history.versions))
+        .catch(() => undefined);
+    } catch (caught) {
+      if ((caught as Error)?.name === "AbortError") return;
+      setError(
+        caught instanceof Error ? caught.message : "The revision failed."
+      );
+    } finally {
+      revisionRequest.current = null;
+      setRevising(false);
+    }
   }
 
   function favoriteForMeal(meal: PlannedMeal): FavoriteRecipe | undefined {
@@ -1105,6 +1184,75 @@ export default function Home() {
       </aside>
 
       <main className="main">
+        {revisionTarget && (
+          <form className="revision-panel" onSubmit={submitRevision}>
+            <div className="revision-heading">
+              <RefreshCw size={15} className={revising ? "spin" : ""} />
+              <span>
+                Revising <strong>{revisionTarget.label}</strong>
+              </span>
+              <button
+                type="button"
+                className="revision-close"
+                onClick={closeRevision}
+                aria-label="Cancel revision"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <input
+              className="input"
+              autoFocus
+              value={revisionText}
+              onChange={(event) => setRevisionText(event.target.value)}
+              disabled={revising}
+              placeholder={
+                revisionTarget.scope.kind === "meal"
+                  ? "What should change? e.g. make it vegetarian, less spicy, quicker"
+                  : "What should change? Leave blank to let Harvest improve it."
+              }
+            />
+
+            <div className="revision-actions">
+              {revising ? (
+                <>
+                  <span className="revision-status">
+                    {revisionStage === "running_tool"
+                      ? "Rewriting…"
+                      : revisionStage === "repairing_output"
+                      ? "Refining…"
+                      : revisionStage === "saving_results"
+                      ? "Saving…"
+                      : "Starting…"}
+                  </span>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={closeRevision}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="revision-status">
+                    {canChat
+                      ? "Everything outside this scope stays exactly as it is."
+                      : "Add a provider API key to revise."}
+                  </span>
+                  <button
+                    type="submit"
+                    className="primary-button"
+                    disabled={!canChat}
+                  >
+                    Revise
+                  </button>
+                </>
+              )}
+            </div>
+          </form>
+        )}
         {claimedAnonymousData && (
           <div className="claim-banner">
             <Check size={16} />
@@ -2635,6 +2783,7 @@ export default function Home() {
               <button
                 className="primary-button"
                 onClick={() => reviseMeal(selectedMeal)}
+                disabled={revising}
               >
                 <RefreshCw size={16} /> Revise this meal
               </button>

@@ -352,7 +352,15 @@ export async function streamChat<T>(
     throw new Error(payload?.error ?? "The request could not be started.");
   }
 
-  const reader = response.body.getReader();
+  return readNdjsonStream<T>(response.body, options.onProgress);
+}
+
+/** Consumes the newline-delimited progress/result/error stream both AI routes emit. */
+async function readNdjsonStream<T>(
+  body: ReadableStream<Uint8Array>,
+  onProgress: (stage: ChatProgressStage, tool?: RoutedChatTool) => void
+): Promise<T> {
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let result: T | undefined;
@@ -373,7 +381,7 @@ export async function streamChat<T>(
         error?: string;
       };
       if (event.type === "progress" && event.stage) {
-        options.onProgress(event.stage, event.tool);
+        onProgress(event.stage, event.tool);
       }
       if (event.type === "result") result = event.result;
       if (event.type === "error") throw new Error(event.error ?? "The agent failed.");
@@ -383,6 +391,57 @@ export async function streamChat<T>(
 
   if (!result) throw new Error("The provider closed the request without a result.");
   return result;
+}
+
+export type RevisionScope =
+  | { kind: "plan" }
+  | { kind: "day"; date: string }
+  | { kind: "meal"; date: string; mealName: string; mealType: string };
+
+/**
+ * Revises the active plan without touching the conversation.
+ *
+ * The scope travels as data, so a one-meal edit stays a one-meal edit no matter
+ * what the user types in the box.
+ */
+export async function streamPlanRevision<T>(options: {
+  apiKey?: string;
+  signal: AbortSignal;
+  body: {
+    threadId: string;
+    scope: RevisionScope;
+    instruction: string;
+    provider: string;
+    model: string;
+  };
+  onProgress: (stage: ChatProgressStage, tool?: RoutedChatTool) => void;
+}): Promise<T> {
+  const token = getSessionToken();
+  if (!token) throw new SessionExpiredError("Sign in to continue.");
+
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${token}`,
+  };
+  if (options.apiKey) headers["x-provider-api-key"] = options.apiKey;
+
+  const response = await fetch(`${API_URL}/api/plans/revise/stream`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(options.body),
+    signal: options.signal,
+  });
+
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => null);
+    if (response.status === 401) {
+      signOut();
+      throw new SessionExpiredError(payload?.error);
+    }
+    throw new Error(payload?.error ?? "The revision could not be started.");
+  }
+
+  return readNdjsonStream<T>(response.body, options.onProgress);
 }
 
 export function getOrCreateThreadId(): string {
