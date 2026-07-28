@@ -255,7 +255,44 @@ export async function fetchAccount(): Promise<Account> {
 export function signOut(): void {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(SESSION_KEY);
-  window.sessionStorage.removeItem("harvest-provider-key");
+}
+
+/* --------------------------------------------------- provider credentials */
+
+export interface ProviderKeySummary {
+  provider: string;
+  /** Last four characters only — enough to recognise, useless to an attacker. */
+  keyHint: string;
+  updatedAt: string;
+}
+
+export async function listProviderKeys(): Promise<ProviderKeySummary[]> {
+  const { providerKeys } = await apiRequest<{
+    providerKeys: ProviderKeySummary[];
+  }>("/api/provider-keys", {});
+  return providerKeys;
+}
+
+export async function saveProviderKey(
+  provider: string,
+  apiKey: string
+): Promise<ProviderKeySummary[]> {
+  const { providerKeys } = await apiRequest<{
+    providerKeys: ProviderKeySummary[];
+  }>("/api/provider-keys", {
+    method: "PUT",
+    body: JSON.stringify({ provider, apiKey }),
+  });
+  return providerKeys;
+}
+
+export async function deleteProviderKey(
+  provider: string
+): Promise<ProviderKeySummary[]> {
+  const { providerKeys } = await apiRequest<{
+    providerKeys: ProviderKeySummary[];
+  }>(`/api/provider-keys/${provider}`, { method: "DELETE" });
+  return providerKeys;
 }
 
 /** Thrown when the session is missing or expired, so the UI can re-prompt. */
@@ -278,7 +315,8 @@ export type RoutedChatTool = "advisor" | "preferences" | "pantry" | "planner";
 
 export async function streamChat<T>(
   options: {
-    apiKey: string;
+    /** Optional one-off key; omitted when the saved key should be used. */
+    apiKey?: string;
     signal: AbortSignal;
     body: {
       threadId: string;
@@ -292,13 +330,15 @@ export async function streamChat<T>(
   const token = getSessionToken();
   if (!token) throw new SessionExpiredError("Sign in to continue.");
 
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${token}`,
+  };
+  if (options.apiKey) headers["x-provider-api-key"] = options.apiKey;
+
   const response = await fetch(`${API_URL}/api/chat/stream`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${token}`,
-      "x-provider-api-key": options.apiKey,
-    },
+    headers,
     body: JSON.stringify(options.body),
     signal: options.signal,
   });

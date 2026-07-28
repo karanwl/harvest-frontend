@@ -34,9 +34,11 @@ The API it depends on lives in the `harvest-backend` repository.
 anyone using the site. Never put a database URL, provider key, or any other
 secret in one.
 
-The user's provider API key is entered in the UI, held in `sessionStorage` for
-the tab, and sent per request as the `x-provider-api-key` header. It is never
-written to a Vercel environment variable and never persisted by the backend.
+The user's provider API key is entered in the UI. It can be saved to their
+account, in which case the backend encrypts it at rest and the browser keeps no
+copy, or used for a single request without saving. A saved key is never sent
+back to the browser — the UI shows only its last four characters. Provider keys
+never go in a Vercel environment variable.
 
 ## Authentication
 
@@ -104,9 +106,9 @@ npm run build
 
 ## Security notes
 
-- The session token lives in `localStorage` and the provider key in
-  `sessionStorage`, both readable by injected script, so frontend XSS
-  protections remain important.
+- The session token lives in `localStorage`, readable by injected script, so
+  frontend XSS protections remain important. Once a provider key is saved it is
+  held only on the server, so it is no longer exposed to browser script.
 - Signing out clears both from the browser, but the session token stays
   cryptographically valid on the server until it expires.
 - Nutrition and coaching figures rendered here are screening estimates produced

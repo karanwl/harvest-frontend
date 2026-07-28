@@ -36,7 +36,11 @@ import {
   DEFAULT_PREFERENCES,
   FavoriteRecipe,
   Account,
+  deleteProviderKey,
   fetchAccount,
+  listProviderKeys,
+  ProviderKeySummary,
+  saveProviderKey,
   getOrCreateThreadId,
   getSessionToken,
   signInWithGoogle,
@@ -159,6 +163,8 @@ export default function Home() {
   const [model, setModel] = useState(MODEL_OPTIONS.openai[0]);
   const [customModel, setCustomModel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [providerKeys, setProviderKeys] = useState<ProviderKeySummary[]>([]);
+  const [savingKey, setSavingKey] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [message, setMessage] = useState("");
@@ -410,6 +416,7 @@ export default function Home() {
     setCoaching(null);
     setPreferences(DEFAULT_PREFERENCES);
     setApiKey("");
+    setProviderKeys([]);
     setUserId("");
     setLoading(true);
   }
@@ -419,7 +426,7 @@ export default function Home() {
     const nextThreadId = getOrCreateThreadId();
     setUserId(account.userId);
     setThreadId(nextThreadId);
-    setApiKey(window.sessionStorage.getItem("harvest-provider-key") ?? "");
+    setApiKey("");
     setLoading(true);
 
     Promise.all([
@@ -438,8 +445,10 @@ export default function Home() {
         `/api/chat/history?threadId=${nextThreadId}`,
         {}
       ),
+      listProviderKeys().catch(() => [] as ProviderKeySummary[]),
     ])
-      .then(([bootstrap, history]) => {
+      .then(([bootstrap, history, keys]) => {
+        setProviderKeys(keys);
         setPreferences(bootstrap.preferences);
         setPantry(bootstrap.pantry);
         setPlan(bootstrap.plan);
@@ -473,19 +482,42 @@ export default function Home() {
     setCustomModel("");
   }
 
-  function rememberKey(nextKey: string) {
-    setApiKey(nextKey);
-    if (nextKey) {
-      window.sessionStorage.setItem("harvest-provider-key", nextKey);
-    } else {
-      window.sessionStorage.removeItem("harvest-provider-key");
+  const savedKey = providerKeys.find((entry) => entry.provider === provider);
+  const canChat = Boolean(savedKey) || apiKey.length >= 8;
+
+  async function storeProviderKey() {
+    const trimmed = apiKey.trim();
+    if (trimmed.length < 8 || savingKey) return;
+    setSavingKey(true);
+    setError("");
+    try {
+      setProviderKeys(await saveProviderKey(provider, trimmed));
+      // The server holds it now; drop the browser's plaintext copy.
+      setApiKey("");
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Could not save the key."
+      );
+    } finally {
+      setSavingKey(false);
+    }
+  }
+
+  async function removeProviderKey(target: Provider) {
+    setError("");
+    try {
+      setProviderKeys(await deleteProviderKey(target));
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Could not remove the key."
+      );
     }
   }
 
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const text = message.trim();
-    if (!text || !apiKey || !userId || !threadId || sending) return;
+    if (!text || !canChat || !userId || !threadId || sending) return;
 
     setError("");
     setSending(true);
@@ -514,7 +546,8 @@ export default function Home() {
         };
         plan: MealPlan | null;
       }>({
-        apiKey,
+        // Omitted when a saved key should be used; only sent for a one-off key.
+        apiKey: apiKey.trim() || undefined,
         signal: controller.signal,
         onProgress: (stage, tool) => {
           setProgressStage(stage);
@@ -1034,8 +1067,9 @@ export default function Home() {
           <strong>
             <ShieldCheck size={15} /> Your key stays yours
           </strong>
-          Provider keys are used for one request at a time and are never written
-          to the Harvest database.
+          Saved provider keys are encrypted before they are stored and are only
+          ever decrypted to call that provider on your behalf. Harvest never
+          shows a saved key again, and you can remove it at any time.
         </div>
         <div className="account-row">
           {account.pictureUrl ? (
@@ -1213,7 +1247,7 @@ export default function Home() {
                   <button
                     className="primary-button"
                     aria-label="Send"
-                    disabled={!message.trim() || !apiKey || sending}
+                    disabled={!message.trim() || !canChat || sending}
                   >
                     <Send size={18} />
                   </button>
@@ -1265,7 +1299,9 @@ export default function Home() {
                   />
                 </div>
                 <div className="field">
-                  <label htmlFor="api-key">Provider API key</label>
+                  <label htmlFor="api-key">
+                    {provider} API key
+                  </label>
                   <div className="key-row">
                     <input
                       className="input"
@@ -1273,8 +1309,10 @@ export default function Home() {
                       type={showKey ? "text" : "password"}
                       autoComplete="off"
                       value={apiKey}
-                      onChange={(event) => rememberKey(event.target.value)}
-                      placeholder="Required to chat"
+                      onChange={(event) => setApiKey(event.target.value)}
+                      placeholder={
+                        savedKey ? "Replace the saved key" : "Paste your key"
+                      }
                     />
                     <button
                       type="button"
@@ -1285,12 +1323,60 @@ export default function Home() {
                       {showKey ? <EyeOff size={17} /> : <Eye size={17} />}
                     </button>
                   </div>
+
+                  <div className="key-actions">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={storeProviderKey}
+                      disabled={apiKey.trim().length < 8 || savingKey}
+                    >
+                      {savingKey
+                        ? "Saving…"
+                        : savedKey
+                        ? "Replace saved key"
+                        : "Save key to my account"}
+                    </button>
+                    {savedKey && (
+                      <button
+                        type="button"
+                        className="ghost-button danger"
+                        onClick={() => removeProviderKey(provider)}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+
                   <div className="key-status">
-                    <span className={`dot ${apiKey ? "ready" : ""}`} />
-                    {apiKey
-                      ? "Stored only for this browser tab"
+                    <span className={`dot ${canChat ? "ready" : ""}`} />
+                    {savedKey
+                      ? `Saved key ending ${savedKey.keyHint} — encrypted on the server`
+                      : apiKey
+                      ? "Will be used for this request only unless you save it"
                       : "No key configured"}
                   </div>
+
+                  {providerKeys.length > 0 && (
+                    <div className="key-saved-list">
+                      {providerKeys.map((entry) => (
+                        <div key={entry.provider} className="key-saved-item">
+                          <span>
+                            {entry.provider} · ending {entry.keyHint}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              removeProviderKey(entry.provider as Provider)
+                            }
+                            aria-label={`Remove the saved ${entry.provider} key`}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </aside>
             </div>

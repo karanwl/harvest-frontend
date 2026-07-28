@@ -2193,3 +2193,76 @@ select:focus {
 .claim-banner button:hover {
   opacity: 1;
 }
+
+/* -------------------------------------------------------- saved key panel */
+
+.key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.ghost-button {
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.ghost-button:hover:not(:disabled) {
+  background: var(--sage);
+}
+
+.ghost-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ghost-button.danger {
+  color: #93381d;
+  border-color: rgba(231, 124, 88, 0.4);
+}
+
+.ghost-button.danger:hover {
+  background: rgba(231, 124, 88, 0.12);
+}
+
+.key-saved-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line);
+}
+
+.key-saved-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
+.key-saved-item button {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.key-saved-item button:hover {
+  background: rgba(231, 124, 88, 0.12);
+  color: #93381d;
+}
