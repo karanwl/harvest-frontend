@@ -813,7 +813,16 @@ export default function Home() {
     }));
   }
 
+  /**
+   * Checking something off means it is now in the kitchen, so it moves into the
+   * pantry — which is what makes the next plan cook from what was just bought
+   * and keeps it off the following shopping list. Unchecking takes it back out,
+   * so a mis-tap is recoverable.
+   */
   function toggleShoppingItem(key: string) {
+    const entry = shoppingEntries.find((item) => item.key === key);
+    const nowChecked = !checkedShoppingSet.has(key);
+
     setCheckedShoppingItems((current) => {
       const next = current.includes(key)
         ? current.filter((item) => item !== key)
@@ -823,6 +832,36 @@ export default function Home() {
       }
       return next;
     });
+
+    if (!entry) return;
+    const sameName = (item: PantryItem) =>
+      item.name.trim().toLocaleLowerCase() ===
+      entry.name.trim().toLocaleLowerCase();
+
+    const nextPantry = nowChecked
+      ? [
+          ...pantry.filter((item) => !sameName(item)),
+          {
+            name: entry.name,
+            quantity: entry.quantity,
+            category: entry.category,
+            expiresAt: null,
+          },
+        ]
+      : pantry.filter((item) => !sameName(item));
+
+    setPantry(nextPantry);
+    apiRequest<{ pantry: PantryItem[] }>("/api/pantry", {
+      method: "PUT",
+      body: JSON.stringify({ pantry: nextPantry }),
+    })
+      .then((saved) => setPantry(saved.pantry))
+      .catch(() => {
+        // Keep the tick, but do not leave the pantry showing something that
+        // was never stored.
+        setPantry(pantry);
+        setError("Checked the item, but it could not be added to your pantry.");
+      });
   }
 
   function clearShoppingChecks() {
@@ -1679,8 +1718,9 @@ export default function Home() {
                         className="clear-button"
                         type="button"
                         onClick={clearShoppingChecks}
+                        title="Resets the ticks for a new shopping trip. Anything already added to your pantry stays there."
                       >
-                        Clear checks
+                        Reset ticks
                       </button>
                     )}
                   </div>
@@ -1695,7 +1735,7 @@ export default function Home() {
                         left to buy
                       </div>
                       <span>
-                        {checkedShoppingCount} of {shoppingEntries.length} checked
+                        {checkedShoppingCount} of {shoppingEntries.length} checked · ticked items move to your pantry
                       </span>
                       <div className="shopping-progress-track">
                         <span
