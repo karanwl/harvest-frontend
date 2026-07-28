@@ -7,6 +7,8 @@ The API it depends on lives in the `harvest-backend` repository.
 
 ## What it provides
 
+- Google sign-in. The app is gated behind it, and the session persists across
+  reloads and devices.
 - A unified chat that routes itself — the user never picks a mode or tool.
 - A calendar-style week board with click-through recipe details.
 - Editable preferences: diet, allergies, dislikes, household size, budget,
@@ -26,6 +28,7 @@ The API it depends on lives in the `harvest-backend` repository.
 | Variable | Required | Secret | Purpose |
 |---|---|---|---|
 | `NEXT_PUBLIC_API_URL` | yes | no | Base URL of the Harvest backend, e.g. `https://YOUR_FLY_APP.fly.dev` |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | yes | no | OAuth 2.0 Web client ID. Must match the backend's `GOOGLE_CLIENT_ID` exactly. |
 
 `NEXT_PUBLIC_*` values are embedded in the browser bundle and are readable by
 anyone using the site. Never put a database URL, provider key, or any other
@@ -34,6 +37,23 @@ secret in one.
 The user's provider API key is entered in the UI, held in `sessionStorage` for
 the tab, and sent per request as the `x-provider-api-key` header. It is never
 written to a Vercel environment variable and never persisted by the backend.
+
+## Authentication
+
+Sign-in uses Google Identity Services. The button yields a Google ID token,
+which is posted to the backend once and exchanged for a Harvest session token
+stored in `localStorage` and sent as `Authorization: Bearer`. Any `401` clears
+the stored token and returns the user to the sign-in screen.
+
+The client ID must be registered in the Google Cloud console with every origin
+the app is served from under **Authorized JavaScript origins** — including
+`http://localhost:3000` for development. Google validates the origin, so a
+missing entry makes the sign-in button silently fail to render. See the
+`harvest-backend` README for the full console walkthrough.
+
+If a browser had been using Harvest anonymously before sign-in existed, its
+local id is offered once during sign-in so the existing preferences, pantry, and
+plans are carried into the new account rather than stranded.
 
 ## Local setup
 
@@ -62,8 +82,16 @@ Open `http://localhost:3000`.
    NEXT_PUBLIC_API_URL=https://YOUR_FLY_APP.fly.dev
    ```
 
-3. Deploy.
-4. Add the resulting Vercel URL to the backend's `FRONTEND_ORIGIN` secret, or
+3. Add the Google client ID:
+
+   ```text
+   NEXT_PUBLIC_GOOGLE_CLIENT_ID=YOUR_CLIENT_ID.apps.googleusercontent.com
+   ```
+
+4. Add the Vercel URL to **Authorized JavaScript origins** on that OAuth client
+   in the Google Cloud console, or sign-in will not render in production.
+5. Deploy.
+6. Add the resulting Vercel URL to the backend's `FRONTEND_ORIGIN` secret, or
    the API will reject the browser's requests via CORS. Include preview domains
    only if they should be able to call the backend.
 
@@ -76,10 +104,11 @@ npm run build
 
 ## Security notes
 
-- The identity mechanism is an anonymous UUID stored in the browser. It suits a
-  private deployment, not a public multi-user launch.
-- Because the provider key can live in `sessionStorage` for the tab, frontend
-  XSS protections remain important.
+- The session token lives in `localStorage` and the provider key in
+  `sessionStorage`, both readable by injected script, so frontend XSS
+  protections remain important.
+- Signing out clears both from the browser, but the session token stays
+  cryptographically valid on the server until it expires.
 - Nutrition and coaching figures rendered here are screening estimates produced
   by the backend, not medical advice.
 

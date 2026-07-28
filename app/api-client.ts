@@ -185,13 +185,85 @@ const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080").rep
   ""
 );
 
-export function getOrCreateUserId(): string {
-  const storageKey = "harvest-user-id";
-  const existing = window.localStorage.getItem(storageKey);
-  if (existing) return existing;
-  const id = window.crypto.randomUUID();
-  window.localStorage.setItem(storageKey, id);
-  return id;
+/* -------------------------------------------------------------------- auth */
+
+const SESSION_KEY = "harvest-session-token";
+const LEGACY_USER_KEY = "harvest-user-id";
+
+export interface Account {
+  userId: string;
+  email: string | null;
+  displayName: string | null;
+  pictureUrl: string | null;
+  createdAt: string;
+}
+
+export interface AuthSession {
+  token: string;
+  expiresAt: string;
+  account: Account;
+  claimedAnonymousData: boolean;
+}
+
+export function getSessionToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(SESSION_KEY);
+}
+
+/**
+ * The anonymous browser id this device used before Google sign-in existed.
+ * It is offered once, at sign-in, so any preferences and plans built up
+ * anonymously are carried into the new account instead of being stranded.
+ */
+function legacyAnonymousUserId(): string | null {
+  if (typeof window === "undefined") return null;
+  const value = window.localStorage.getItem(LEGACY_USER_KEY);
+  return value && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+}
+
+export async function signInWithGoogle(
+  googleIdToken: string
+): Promise<AuthSession> {
+  const response = await fetch(`${API_URL}/api/auth/google`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      idToken: googleIdToken,
+      anonymousUserId: legacyAnonymousUserId(),
+    }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.error ?? "Google sign-in failed.");
+  }
+
+  const session = payload as AuthSession;
+  window.localStorage.setItem(SESSION_KEY, session.token);
+  // The anonymous id has served its purpose; keeping it risks re-claiming it
+  // against a different account later.
+  if (session.claimedAnonymousData) {
+    window.localStorage.removeItem(LEGACY_USER_KEY);
+  }
+  return session;
+}
+
+export async function fetchAccount(): Promise<Account> {
+  const { account } = await apiRequest<{ account: Account }>("/api/auth/me", {});
+  return account;
+}
+
+export function signOut(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(SESSION_KEY);
+  window.sessionStorage.removeItem("harvest-provider-key");
+}
+
+/** Thrown when the session is missing or expired, so the UI can re-prompt. */
+export class SessionExpiredError extends Error {
+  constructor(message = "Your session has expired. Sign in again.") {
+    super(message);
+    this.name = "SessionExpiredError";
+  }
 }
 
 export type ChatProgressStage =
@@ -206,7 +278,6 @@ export type RoutedChatTool = "advisor" | "preferences" | "pantry" | "planner";
 
 export async function streamChat<T>(
   options: {
-    userId: string;
     apiKey: string;
     signal: AbortSignal;
     body: {
@@ -218,11 +289,14 @@ export async function streamChat<T>(
     onProgress: (stage: ChatProgressStage, tool?: RoutedChatTool) => void;
   }
 ): Promise<T> {
+  const token = getSessionToken();
+  if (!token) throw new SessionExpiredError("Sign in to continue.");
+
   const response = await fetch(`${API_URL}/api/chat/stream`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-user-id": options.userId,
+      authorization: `Bearer ${token}`,
       "x-provider-api-key": options.apiKey,
     },
     body: JSON.stringify(options.body),
@@ -231,6 +305,10 @@ export async function streamChat<T>(
 
   if (!response.ok || !response.body) {
     const payload = await response.json().catch(() => null);
+    if (response.status === 401) {
+      signOut();
+      throw new SessionExpiredError(payload?.error);
+    }
     throw new Error(payload?.error ?? "The request could not be started.");
   }
 
@@ -278,11 +356,14 @@ export function getOrCreateThreadId(): string {
 
 export async function apiRequest<T>(
   path: string,
-  options: RequestInit & { userId: string; apiKey?: string }
+  options: RequestInit & { apiKey?: string }
 ): Promise<T> {
-  const { userId, apiKey, ...fetchOptions } = options;
+  const { apiKey, ...fetchOptions } = options;
+  const token = getSessionToken();
+  if (!token) throw new SessionExpiredError("Sign in to continue.");
+
   const headers = new Headers(fetchOptions.headers);
-  headers.set("x-user-id", userId);
+  headers.set("authorization", `Bearer ${token}`);
   if (apiKey) headers.set("x-provider-api-key", apiKey);
   if (fetchOptions.body) headers.set("content-type", "application/json");
 
@@ -291,6 +372,12 @@ export async function apiRequest<T>(
     headers,
   });
   const payload = await response.json().catch(() => null);
+  if (response.status === 401) {
+    // The session is gone or expired; drop it so the UI falls back to sign-in
+    // rather than retrying with a token the server will keep rejecting.
+    signOut();
+    throw new SessionExpiredError(payload?.error);
+  }
   if (!response.ok) {
     throw new Error(payload?.error ?? "Request failed.");
   }

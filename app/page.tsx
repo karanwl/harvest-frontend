@@ -13,6 +13,7 @@ import {
   Heart,
   History,
   LoaderCircle,
+  LogOut,
   MessageCircle,
   PackageOpen,
   RefreshCw,
@@ -26,7 +27,7 @@ import {
   Utensils,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   apiRequest,
   ChatProgressStage,
@@ -34,8 +35,12 @@ import {
   CoachingCalculations,
   DEFAULT_PREFERENCES,
   FavoriteRecipe,
+  Account,
+  fetchAccount,
   getOrCreateThreadId,
-  getOrCreateUserId,
+  getSessionToken,
+  signInWithGoogle,
+  signOut,
   MealPlan,
   PlanVersion,
   PantryItem,
@@ -117,6 +122,34 @@ function optionalNumber(value: string): number | null {
   return value ? Number(value) : null;
 }
 
+const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
+const GOOGLE_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
+
+/** The slice of Google Identity Services this app uses. */
+interface GoogleIdentityServices {
+  accounts: {
+    id: {
+      initialize(config: {
+        client_id: string;
+        callback: (response: { credential?: string }) => void;
+        auto_select?: boolean;
+        cancel_on_tap_outside?: boolean;
+      }): void;
+      renderButton(
+        parent: HTMLElement,
+        options: Record<string, string | number>
+      ): void;
+      disableAutoSelect(): void;
+    };
+  };
+}
+
+declare global {
+  interface Window {
+    google?: GoogleIdentityServices;
+  }
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("chat");
   const [userId, setUserId] = useState("");
@@ -138,6 +171,11 @@ export default function Home() {
     useState<UserPreferences>(DEFAULT_PREFERENCES);
   const [coaching, setCoaching] = useState<CoachingCalculations | null>(null);
   const [loading, setLoading] = useState(true);
+  const [account, setAccount] = useState<Account | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [claimedAnonymousData, setClaimedAnonymousData] = useState(false);
+  const googleButtonRef = useRef<HTMLDivElement | null>(null);
   const [sending, setSending] = useState(false);
   const [progressStage, setProgressStage] =
     useState<ChatProgressStage>("starting");
@@ -283,12 +321,106 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [sending]);
 
+  // Restore an existing session before deciding what to render.
   useEffect(() => {
-    const nextUserId = getOrCreateUserId();
+    if (!getSessionToken()) {
+      setAuthChecking(false);
+      return;
+    }
+    fetchAccount()
+      .then(setAccount)
+      .catch(() => signOut())
+      .finally(() => setAuthChecking(false));
+  }, []);
+
+  const handleGoogleCredential = useCallback(async (credential: string) => {
+    setAuthError("");
+    try {
+      const session = await signInWithGoogle(credential);
+      setAccount(session.account);
+      setClaimedAnonymousData(session.claimedAnonymousData);
+    } catch (caught) {
+      setAuthError(
+        caught instanceof Error ? caught.message : "Google sign-in failed."
+      );
+    }
+  }, []);
+
+  // Load Google Identity Services only while signed out.
+  useEffect(() => {
+    if (account || authChecking || !GOOGLE_CLIENT_ID) return;
+
+    let cancelled = false;
+    function renderButton() {
+      if (cancelled || !window.google || !googleButtonRef.current) return;
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: (response) => {
+          if (response.credential) {
+            void handleGoogleCredential(response.credential);
+          }
+        },
+        cancel_on_tap_outside: false,
+      });
+      window.google.accounts.id.renderButton(googleButtonRef.current, {
+        theme: "outline",
+        size: "large",
+        text: "continue_with",
+        shape: "pill",
+        width: 280,
+      });
+    }
+
+    if (window.google) {
+      renderButton();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const existing = document.querySelector<HTMLScriptElement>(
+      `script[src="${GOOGLE_SCRIPT_SRC}"]`
+    );
+    const script = existing ?? document.createElement("script");
+    script.src = GOOGLE_SCRIPT_SRC;
+    script.async = true;
+    script.defer = true;
+    script.addEventListener("load", renderButton);
+    script.addEventListener("error", () => {
+      if (!cancelled) setAuthError("Could not reach Google sign-in.");
+    });
+    if (!existing) document.head.appendChild(script);
+
+    return () => {
+      cancelled = true;
+      script.removeEventListener("load", renderButton);
+    };
+  }, [account, authChecking, handleGoogleCredential]);
+
+  function handleSignOut() {
+    window.google?.accounts.id.disableAutoSelect();
+    signOut();
+    setAccount(null);
+    setClaimedAnonymousData(false);
+    setMessages([]);
+    setPlan(null);
+    setPantry([]);
+    setFavorites([]);
+    setPlanVersions([]);
+    setCoaching(null);
+    setPreferences(DEFAULT_PREFERENCES);
+    setApiKey("");
+    setUserId("");
+    setLoading(true);
+  }
+
+  useEffect(() => {
+    if (!account) return;
     const nextThreadId = getOrCreateThreadId();
-    setUserId(nextUserId);
+    setUserId(account.userId);
     setThreadId(nextThreadId);
     setApiKey(window.sessionStorage.getItem("harvest-provider-key") ?? "");
+    setLoading(true);
 
     Promise.all([
       apiRequest<{
@@ -300,11 +432,11 @@ export default function Home() {
         versions: PlanVersion[];
       }>(
         "/api/bootstrap",
-        { userId: nextUserId }
+        {}
       ),
       apiRequest<{ messages: ChatMessage[] }>(
         `/api/chat/history?threadId=${nextThreadId}`,
-        { userId: nextUserId }
+        {}
       ),
     ])
       .then(([bootstrap, history]) => {
@@ -324,7 +456,7 @@ export default function Home() {
         );
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [account]);
 
   const title = useMemo(() => {
     if (view === "plan") return "This week, thoughtfully planned";
@@ -382,7 +514,6 @@ export default function Home() {
         };
         plan: MealPlan | null;
       }>({
-        userId,
         apiKey,
         signal: controller.signal,
         onProgress: (stage, tool) => {
@@ -417,10 +548,8 @@ export default function Home() {
         try {
           const [persisted, history] = await Promise.all([
             apiRequest<{ plan: MealPlan | null }>("/api/plans/current", {
-              userId,
             }),
             apiRequest<{ versions: PlanVersion[] }>("/api/plans/history", {
-              userId,
             }),
           ]);
           setPlanVersions(history.versions);
@@ -446,10 +575,8 @@ export default function Home() {
       if (Object.keys(result.preferenceUpdates).length > 0) {
         const [refreshed, coachingResult] = await Promise.all([
           apiRequest<{ preferences: UserPreferences }>("/api/preferences", {
-            userId,
           }),
           apiRequest<{ coaching: CoachingCalculations }>("/api/coaching", {
-            userId,
           }),
         ]);
         setPreferences(refreshed.preferences);
@@ -462,7 +589,7 @@ export default function Home() {
       ) {
         const refreshed = await apiRequest<{ pantry: PantryItem[] }>(
           "/api/pantry",
-          { userId }
+          {}
         );
         setPantry(refreshed.pantry);
       }
@@ -498,7 +625,7 @@ export default function Home() {
     try {
       await apiRequest<{ cleared: boolean; deletedMessages: number }>(
         `/api/chat/history?threadId=${threadId}`,
-        { method: "DELETE", userId }
+        { method: "DELETE" }
       );
       setMessages([]);
       setRoutedTool(null);
@@ -522,13 +649,13 @@ export default function Home() {
     try {
       await apiRequest<{ cleared: boolean; archived: boolean }>(
         "/api/plans/current",
-        { method: "DELETE", userId }
+        { method: "DELETE" }
       );
       setPlan(null);
       setSelectedMeal(null);
       const history = await apiRequest<{ versions: PlanVersion[] }>(
         "/api/plans/history",
-        { userId }
+        {}
       );
       setPlanVersions(history.versions);
     } catch (caught) {
@@ -554,7 +681,6 @@ export default function Home() {
         versions: PlanVersion[];
       }>(`/api/plans/history/${version.id}/restore`, {
         method: "POST",
-        userId,
       });
       setPlan(result.plan);
       setPlanVersions(result.versions);
@@ -581,7 +707,6 @@ export default function Home() {
         "/api/preferences",
         {
           method: "PUT",
-          userId,
           body: JSON.stringify(preferences),
         }
       );
@@ -604,7 +729,6 @@ export default function Home() {
     try {
       const result = await apiRequest<{ pantry: PantryItem[] }>("/api/pantry", {
         method: "PUT",
-        userId,
         body: JSON.stringify({ pantry: nextPantry }),
       });
       setPantry(result.pantry);
@@ -732,7 +856,7 @@ export default function Home() {
       if (existing) {
         await apiRequest<{ removed: boolean }>(
           `/api/favorites/${existing.id}`,
-          { method: "DELETE", userId }
+          { method: "DELETE" }
         );
         setFavorites((current) =>
           current.filter((favorite) => favorite.id !== existing.id)
@@ -743,7 +867,6 @@ export default function Home() {
           "/api/favorites",
           {
             method: "POST",
-            userId,
             body: JSON.stringify({ recipe: meal }),
           }
         );
@@ -780,7 +903,6 @@ export default function Home() {
       const existing = favoriteForMeal(meal);
       await apiRequest<{ recorded: boolean }>("/api/meal-feedback", {
         method: "POST",
-        userId,
         body: JSON.stringify({
           mealName: meal.name,
           feedback,
@@ -791,14 +913,14 @@ export default function Home() {
       if (feedback === "cooked" && existing) {
         const refreshed = await apiRequest<{ favorites: FavoriteRecipe[] }>(
           "/api/favorites",
-          { userId }
+          {}
         );
         setFavorites(refreshed.favorites);
       }
       if (feedback === "not_for_me" && existing) {
         await apiRequest<{ removed: boolean }>(
           `/api/favorites/${existing.id}`,
-          { method: "DELETE", userId }
+          { method: "DELETE" }
         );
         setFavorites((current) =>
           current.filter((favorite) => favorite.id !== existing.id)
@@ -837,6 +959,49 @@ export default function Home() {
     { id: "preferences", label: "Preferences", icon: Settings2 },
   ];
 
+  if (authChecking) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <LoaderCircle className="spin" size={22} />
+          <p className="auth-subtitle">Checking your session…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!account) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <div className="brand-mark">H</div>
+          <h1 className="auth-title">Harvest</h1>
+          <p className="auth-subtitle">
+            Sign in with Google to keep your preferences, pantry, and plans on
+            every device.
+          </p>
+
+          {GOOGLE_CLIENT_ID ? (
+            <div className="auth-button" ref={googleButtonRef} />
+          ) : (
+            <p className="auth-error">
+              Google sign-in is not configured. Set NEXT_PUBLIC_GOOGLE_CLIENT_ID
+              and redeploy.
+            </p>
+          )}
+
+          {authError && <p className="auth-error">{authError}</p>}
+
+          <p className="auth-fineprint">
+            Harvest stores the email address on your Google account to identify
+            you. Your AI provider key is never sent to Google and is never saved
+            on our servers.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -872,9 +1037,56 @@ export default function Home() {
           Provider keys are used for one request at a time and are never written
           to the Harvest database.
         </div>
+        <div className="account-row">
+          {account.pictureUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              className="account-avatar"
+              src={account.pictureUrl}
+              alt=""
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="account-avatar account-avatar-fallback">
+              {(account.displayName ?? account.email ?? "?")
+                .slice(0, 1)
+                .toUpperCase()}
+            </div>
+          )}
+          <div className="account-identity">
+            <span className="account-name">
+              {account.displayName ?? "Signed in"}
+            </span>
+            <span className="account-email">{account.email}</span>
+          </div>
+          <button
+            type="button"
+            className="account-signout"
+            onClick={handleSignOut}
+            title="Sign out"
+          >
+            <LogOut size={16} />
+          </button>
+        </div>
       </aside>
 
       <main className="main">
+        {claimedAnonymousData && (
+          <div className="claim-banner">
+            <Check size={16} />
+            <span>
+              The preferences, pantry, and plans you built on this device are now
+              saved to {account.email ?? "your account"}.
+            </span>
+            <button
+              type="button"
+              onClick={() => setClaimedAnonymousData(false)}
+              aria-label="Dismiss"
+            >
+              <X size={15} />
+            </button>
+          </div>
+        )}
         <header className="topbar">
           <div>
             <div className="eyebrow">Your kitchen · your rules</div>
